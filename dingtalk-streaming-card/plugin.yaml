@@ -1,0 +1,24 @@
+name: dingtalk-streaming-card
+label: DingTalk Streaming Card
+kind: platform
+version: 0.1.0
+description: >
+  Enhanced DingTalk AI streaming card: one card per turn with status, tools,
+  thinking, and answer streams. Replaces the stock dingtalk platform adapter
+  when enabled.
+author: Hermes
+provides_hooks:
+  - pre_gateway_dispatch
+  - on_stream_delta
+  - on_stream_end
+  - pre_tool_call
+  - post_tool_call
+  - post_api_request
+  - on_session_end
+  - agent_loop_stopped
+  - api_request_error
+config_schema:
+  group_thinking:
+    type: bool
+    default: true
+    description: Show thinking stream in group chats (DM always shows thinking)
