@@ -2,9 +2,10 @@
 
 import asyncio
 
-from adapter import EnhancedDingTalkAdapter
-from hooks import HookBridge
-from turnbook import Frame, TurnBook
+from hermes_plugins.dingtalk_streaming_card.adapter import EnhancedDingTalkAdapter
+from hermes_plugins.dingtalk_streaming_card.hooks import HookBridge
+from hermes_plugins.dingtalk_streaming_card.routing import route_send
+from hermes_plugins.dingtalk_streaming_card.turnbook import Frame, TurnBook
 
 
 def _bare_adapter(*, bridge=None):
@@ -109,7 +110,4 @@ def test_orphan_after_create_abandons_and_webhooks_once():
     assert posts[0]["markdown"]["text"] == "answer body"
     assert bridge.book.get("t").status == "error"
     assert bridge.book.get("t").delivered is False
-    # next send must webhook, not recreate same track
-    from routing import route_send
-
     assert route_send(bridge.book, chat_id="c", turn_id="t") == "webhook"

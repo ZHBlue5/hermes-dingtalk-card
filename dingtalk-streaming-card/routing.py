@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from turnbook import TurnBook
+    from .turnbook import TurnBook
 
 
 def route_send(book: TurnBook, *, chat_id: str, turn_id: str) -> str:

@@ -1,4 +1,4 @@
-from turnbook import TurnBook
+from hermes_plugins.dingtalk_streaming_card.turnbook import TurnBook
 
 def _book():
     return TurnBook(group_thinking=True)

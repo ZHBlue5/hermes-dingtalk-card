@@ -1,5 +1,5 @@
-from hooks import HookBridge
-from turnbook import TurnBook
+from hermes_plugins.dingtalk_streaming_card.hooks import HookBridge
+from hermes_plugins.dingtalk_streaming_card.turnbook import TurnBook
 
 def test_pre_tool_call_never_raises():
     bridge = HookBridge(TurnBook(group_thinking=True), loop=None)

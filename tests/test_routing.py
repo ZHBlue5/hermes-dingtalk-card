@@ -1,5 +1,5 @@
-from turnbook import TurnBook
-from routing import route_edit, route_send
+from hermes_plugins.dingtalk_streaming_card.routing import route_edit, route_send
+from hermes_plugins.dingtalk_streaming_card.turnbook import TurnBook
 
 def test_segment_reuses_track():
     book = TurnBook(group_thinking=True)

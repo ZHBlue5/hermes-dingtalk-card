@@ -6,7 +6,14 @@ import secrets
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from textutil import fit_param, fit_stream, format_elapsed, format_tokens, tool_line
+from .textutil import (
+    fit_param,
+    fit_stream,
+    format_elapsed,
+    format_tokens,
+    redact_text,
+    tool_line,
+)
 
 _TRUNC_FOOTER = " 回答过长已截断"
 _ORPHAN_SECONDS = 600.0
@@ -131,6 +138,7 @@ class TurnBook:
             orphan.params["headerColor"] = "danger"
             orphan.params["footer"] = "未完成"
             orphan.params["elapsed"] = format_elapsed(now - orphan.started)
+            frames.append(self._params_frame(orphan, now=now, immediate=True))
 
         out_track_id = f"hermes_{secrets.token_hex(6)}"
         params = {
@@ -181,8 +189,8 @@ class TurnBook:
                     is_finalize=False,
                 )
             ]
-        card.thinking += text
-        return self._push_body(card, "thinking", _THINKING_LIMIT)
+        card.thinking += redact_text(text)
+        return self._push_body(card, "thinking", _THINKING_LIMIT, now=now)
 
     def push_content(
         self,
@@ -196,7 +204,9 @@ class TurnBook:
         if card is None or card.status != "running":
             return []
         card.content += text
-        return self._push_body(card, "content", _CONTENT_LIMIT)
+        # segment_finalize 只落盘：不改 status，不写完成态
+        _ = segment_finalize
+        return self._push_body(card, "content", _CONTENT_LIMIT, now=now)
 
     def tool_started(
         self,
@@ -216,7 +226,7 @@ class TurnBook:
         if len(card.tools) > _MAX_TOOLS:
             card.tools = card.tools[:_MAX_TOOLS]
         self._sync_tools(card)
-        return [self._params_frame(card, immediate=True)]
+        return [self._params_frame(card, now=now, immediate=True)]
 
     def tool_finished(self, turn_id: str, tool_id: str, *, now: float) -> list[Frame]:
         card = self.turns.get(turn_id)
@@ -227,7 +237,7 @@ class TurnBook:
                 row.running = False
                 break
         self._sync_tools(card)
-        return [self._params_frame(card, immediate=True)]
+        return [self._params_frame(card, now=now, immediate=True)]
 
     def abandon_undelivered(self, turn_id: str) -> None:
         """Create 已成功但投放/首帧失败：停 running，不 mark_delivered，避免同 outTrackId 再建。"""
@@ -293,7 +303,10 @@ class TurnBook:
         card.params["tool"] = fit_param("\n".join(lines))
         card.params["toolCount"] = str(card.tool_total)
 
-    def _params_frame(self, card: Card, *, immediate: bool = False) -> Frame:
+    def _params_frame(
+        self, card: Card, *, now: float, immediate: bool = False
+    ) -> Frame:
+        card.params["elapsed"] = format_elapsed(now - card.started)
         return Frame(
             card.chat_id,
             card.turn_id,
@@ -308,6 +321,8 @@ class TurnBook:
         card: Card,
         key: str,
         limit: int,
+        *,
+        now: float,
     ) -> list[Frame]:
         raw = card.thinking if key == "thinking" else card.content
         shown, rest = fit_stream(raw, limit)
@@ -315,6 +330,7 @@ class TurnBook:
             card.thinking_capped = True
             card.thinking = raw[: len(raw) - len(rest)]
         card.params[key] = shown
+        card.params["elapsed"] = format_elapsed(now - card.started)
         frames: list[Frame] = []
         if rest and key == "content":
             frames.extend(self._maybe_trunc_footer(card, rest))
@@ -366,14 +382,7 @@ class TurnBook:
             card.params["tokens"] = tokens
         self._session_running.pop(card.session_key, None)
         frames: list[Frame] = [
-            Frame(
-                card.chat_id,
-                card.turn_id,
-                card.out_track_id,
-                "params",
-                params=dict(card.params),
-                immediate=True,
-            )
+            self._params_frame(card, now=now, immediate=True)
         ]
         for key in sorted(card.streamed_keys):
             content = card.params.get(key, "")

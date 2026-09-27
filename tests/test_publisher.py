@@ -1,7 +1,8 @@
 import asyncio
-from turnbook import Frame
-from coalesce import Coalescer
-from publisher import Publisher, TERMINAL_ORDER
+
+from hermes_plugins.dingtalk_streaming_card.coalesce import Coalescer
+from hermes_plugins.dingtalk_streaming_card.publisher import Publisher, TERMINAL_ORDER
+from hermes_plugins.dingtalk_streaming_card.turnbook import Frame
 
 class Api:
     def __init__(self, fail_stream=0, fail_error=False):

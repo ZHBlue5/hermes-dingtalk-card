@@ -10,9 +10,9 @@ import logging
 import time
 from typing import Any
 
-from coalesce import Coalescer
-from publisher import Publisher
-from turnbook import Frame, TurnBook
+from .coalesce import Coalescer
+from .publisher import Publisher
+from .turnbook import Frame, TurnBook
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class HookBridge:
         self._session_store: Any = None
         # session_key → (chat_id, chat_type)；宿主进线时尚无 session_id
         self._pending_chats: dict[str, tuple[str, str]] = {}
+        self._flush_scheduled = False
 
     def set_loop(self, loop: asyncio.AbstractEventLoop | None, api: Any = None) -> None:
         """绑定网关事件循环与 CardApi 实现。"""
@@ -48,14 +49,15 @@ class HookBridge:
             self.api = api
 
     def active_turn(self, chat_id: str) -> str:
-        """返回该 chat 上最新的 running turn_id；没有则空串。"""
-        latest = ""
-        latest_started = -1.0
-        for turn_id, card in self.book.turns.items():
-            if card.chat_id == chat_id and card.status == "running" and card.started >= latest_started:
-                latest = turn_id
-                latest_started = card.started
-        return latest
+        """恰好一张 running 卡时返回其 turn_id；多张则空串（走 webhook）。"""
+        running = [
+            turn_id
+            for turn_id, card in self.book.turns.items()
+            if card.chat_id == chat_id and card.status == "running"
+        ]
+        if len(running) != 1:
+            return ""
+        return running[0]
 
     def _now(self) -> float:
         return time.time()
@@ -108,12 +110,46 @@ class HookBridge:
         ready: list[Frame] = []
         for frame in frames:
             ready.extend(self.coalescer.push(frame, now))
-        if self.loop is None or self.api is None or not ready:
+        if self.loop is None or self.api is None:
             return
+        if ready:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.publisher.send(self.api, ready), self.loop
+                )
+            except Exception:
+                logger.exception("failed to schedule card publisher")
+        if self.coalescer.has_pending:
+            self._schedule_flush()
+
+    def _schedule_flush(self) -> None:
+        """在 coalescer.interval 后刷出到期帧（纯文本轮不必等到 finish）。"""
+        if self.loop is None or self.api is None or self._flush_scheduled:
+            return
+        self._flush_scheduled = True
+        interval = self.coalescer.interval
+
+        def _run() -> None:
+            self._flush_scheduled = False
+            if self.api is None:
+                return
+            due = self.coalescer.flush(time.time(), force=False)
+            if due:
+                try:
+                    asyncio.create_task(self.publisher.send(self.api, due))
+                except Exception:
+                    logger.exception("failed to publish flushed card frames")
+            if self.coalescer.has_pending:
+                self._schedule_flush()
+
+        def _arm() -> None:
+            self.loop.call_later(interval, _run)
+
         try:
-            asyncio.run_coroutine_threadsafe(self.publisher.send(self.api, ready), self.loop)
+            self.loop.call_soon_threadsafe(_arm)
         except Exception:
-            logger.exception("failed to schedule card publisher")
+            self._flush_scheduled = False
+            logger.exception("failed to schedule coalescer flush")
 
     def _guard(self, name: str, fn: Any, **kwargs: Any) -> None:
         try:
@@ -212,7 +248,7 @@ class HookBridge:
         self._emit(frames, now)
 
     def post_tool_call(self, **kwargs: Any) -> None:
-        """成功则 tool_finished；status=error 则 finish_error。"""
+        """工具结束（含 status=error）只标记 tool_finished，不收口卡片。"""
         self._guard("post_tool_call", self._post_tool_call, **kwargs)
 
     def _post_tool_call(self, **kwargs: Any) -> None:
@@ -220,17 +256,7 @@ class HookBridge:
         if not turn_id:
             return
         now = self._now()
-        status = (kwargs.get("status") or "").lower()
-        if status == "error":
-            err = (
-                kwargs.get("error")
-                or kwargs.get("error_message")
-                or kwargs.get("result")
-                or "失败"
-            )
-            frames = self.book.finish_error(turn_id, self._first_line(err, "失败"), now=now)
-            self._emit(frames, now)
-            return
+        # 普通工具失败不 finish_error，卡片继续 running
         frames = self.book.tool_finished(turn_id, kwargs.get("tool_call_id") or "", now=now)
         self._emit(frames, now)
 
@@ -307,12 +333,14 @@ class HookBridge:
         self._emit(frames, now)
 
     def api_request_error(self, **kwargs: Any) -> None:
-        """预检/重试耗尽等路径的收口。"""
+        """不可重试时收口；retryable=True 时保持卡片 running。"""
         self._guard("api_request_error", self._api_request_error, **kwargs)
 
     def _api_request_error(self, **kwargs: Any) -> None:
         turn_id = kwargs.get("turn_id") or ""
         if not turn_id:
+            return
+        if kwargs.get("retryable") is True:
             return
         now = self._now()
         footer = self._first_line(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from turnbook import Frame
+from .turnbook import Frame
 
 
 class Coalescer:
@@ -11,6 +11,11 @@ class Coalescer:
     def __init__(self, interval: float) -> None:
         self.interval = interval
         self._pending: dict[tuple[str, str, str], tuple[Frame, float]] = {}
+
+    @property
+    def has_pending(self) -> bool:
+        """是否仍有待节流刷出的帧。"""
+        return bool(self._pending)
 
     def push(self, frame: Frame, now: float) -> list[Frame]:
         if frame.immediate or frame.is_finalize or frame.is_error:

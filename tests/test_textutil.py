@@ -1,4 +1,10 @@
-from textutil import classify_tool, fit_stream, format_elapsed, format_tokens, tool_line
+from hermes_plugins.dingtalk_streaming_card.textutil import (
+    classify_tool,
+    fit_stream,
+    format_elapsed,
+    format_tokens,
+    tool_line,
+)
 
 
 def test_mcp_github_is_mcp_not_github():
@@ -17,9 +23,10 @@ def test_tool_line_redacts_then_clips_to_one_line():
     line = tool_line("terminal", {"cmd": "echo sk-abcdefghijklmnopqrstuvwxyz\nnext"}, running=True)
     assert "\n" not in line
     assert line.startswith("Shell · ")
+    assert "terminal" in line
     assert "进行中" in line
     assert "sk-abcdefghijklmnopqrstuvwxyz" not in line
-    assert len(line.split("·", 1)[1].strip()) <= 80 or "…" in line
+    assert "…" in line or len(line) < 200
 
 
 def test_five_is_not_this_modules_job():

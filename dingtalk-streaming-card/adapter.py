@@ -14,8 +14,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from gateway.platforms.base import SendResult
 from plugins.platforms.dingtalk.adapter import DingTalkAdapter
-from routing import route_edit, route_send
-from turnbook import Frame
+
+from .routing import route_edit, route_send
+from .turnbook import Frame
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,8 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
                 self.name,
                 self._card_template_id,
             )
-        if ok and self._bridge is not None:
+        # 降级 webhook 时不绑 loop，避免 hooks 仍发增强卡帧
+        if ok and self._enhanced and self._bridge is not None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -261,8 +263,8 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
             else:
                 self._streaming_cards.setdefault(chat_id, {})[result.message_id] = content
             return result
-        if orphaned:
-            bridge.book.abandon_undelivered(turn_id)
+        # create 失败或 create 后投放失败：都 abandon，避免 turn 留在 running
+        bridge.book.abandon_undelivered(turn_id)
         logger.warning("[%s] Enhanced AI Card send failed, falling back to webhook", self.name)
         return await self._send_markdown_webhook(
             chat_id, content, reply_to=reply_to, metadata=metadata
@@ -389,11 +391,11 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
 
         now = time.time()
         card = bridge.book.get(turn_id)
-        # edit 带全文：先对齐再 push，避免重复追加
+        # edit 带全文：对齐追加。宿主段边界会清空 buffer，新段不以前缀出现——
+        # 保留已完成段文本，与 live 段拼接，禁止把 card.content 重置为仅最新段。
         if content.startswith(card.content):
             delta = content[len(card.content) :]
         else:
-            card.content = ""
             delta = content
         frames = bridge.book.push_content(
             turn_id, delta, segment_finalize=finalize, now=now

@@ -8,9 +8,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from adapter import EnhancedDingTalkAdapter
-from hooks import HookBridge
-from turnbook import TurnBook
+from .adapter import EnhancedDingTalkAdapter
+from .hooks import HookBridge
+from .turnbook import TurnBook
 
 logger = logging.getLogger(__name__)
 

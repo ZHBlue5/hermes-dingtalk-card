@@ -129,11 +129,12 @@ def _args_one_line(name: str, args: object) -> str:
 
 def tool_line(name: str, args: object, *, running: bool) -> str:
     """Format one tool row for the card tool list."""
-    label, _shown = classify_tool(name)
+    label, shown = classify_tool(name)
     params = _args_one_line(name, args)
     if len(params) > 80:
         params = params[:80] + "…"
-    line = f"{label} · {params}"
+    # 展示 classify_tool 的 display name（如 github.create_issue / browser_navigate）
+    line = f"{label} · {shown} · {params}" if params else f"{label} · {shown}"
     if running:
         line += " 进行中"
     return line
