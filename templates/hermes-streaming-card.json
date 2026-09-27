@@ -1,0 +1,80 @@
+{
+  "name": "Hermes Enhanced AI Streaming Card",
+  "description": "钉钉增强版 AI 流式卡片模板描述。用于导入或按此清单在控制台手工搭建；插件运行时不创建模板。",
+  "variables": [
+    "status",
+    "headerColor",
+    "title",
+    "model",
+    "elapsed",
+    "tool",
+    "toolCount",
+    "tokens",
+    "thinking",
+    "content",
+    "footer"
+  ],
+  "streaming": ["thinking", "content"],
+  "header": {
+    "fallbackColor": "#1677FF",
+    "bindings": {
+      "info": "#1677FF",
+      "success": "#00B578",
+      "danger": "#F53F3F"
+    },
+    "bindingNote": "v1 色条固定使用 fallbackColor；header.bindings 仅在钉钉控制台支持「样式绑定变量」时启用，否则保持 fallback 即可。"
+  },
+  "layout": [
+    {
+      "id": "colorBar",
+      "type": "headerStripe",
+      "variable": "headerColor",
+      "fallbackColor": "#1677FF"
+    },
+    {
+      "id": "meta",
+      "type": "row",
+      "fields": [
+        { "variable": "title", "label": "标题" },
+        { "variable": "model", "label": "模型" },
+        { "variable": "elapsed", "label": "耗时" }
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "section",
+      "title": "工具",
+      "fields": [
+        { "variable": "tool", "format": "markdown" },
+        { "variable": "toolCount", "label": "调用次数" }
+      ]
+    },
+    {
+      "id": "thinking",
+      "type": "section",
+      "title": "思考",
+      "variable": "thinking",
+      "format": "markdown",
+      "streaming": true
+    },
+    {
+      "id": "content",
+      "type": "section",
+      "title": "回答",
+      "variable": "content",
+      "format": "markdown",
+      "streaming": true
+    },
+    {
+      "id": "footer",
+      "type": "footer",
+      "variable": "footer"
+    }
+  ],
+  "limits": {
+    "streamFrameBytes": 1024,
+    "thinkingCumulativeBytes": 1024,
+    "contentCumulativeBytes": 2048,
+    "plainVariableBytes": 1024
+  }
+}
