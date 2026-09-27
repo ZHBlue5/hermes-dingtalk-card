@@ -59,6 +59,7 @@ class Card:
     usage_prompt: int = 0
     usage_completion: int = 0
     truncated_footer: bool = False
+    thinking_capped: bool = False
     tool_total: int = 0
 
 
@@ -168,6 +169,18 @@ class TurnBook:
             return []
         if card.chat_type == "group" and not self.group_thinking:
             return []
+        if card.thinking_capped:
+            return [
+                Frame(
+                    card.chat_id,
+                    card.turn_id,
+                    card.out_track_id,
+                    "stream",
+                    key="thinking",
+                    content=card.params["thinking"],
+                    is_finalize=False,
+                )
+            ]
         card.thinking += text
         return self._push_body(card, "thinking", _THINKING_LIMIT)
 
@@ -278,9 +291,12 @@ class TurnBook:
     ) -> list[Frame]:
         raw = card.thinking if key == "thinking" else card.content
         shown, rest = fit_stream(raw, limit)
+        if key == "thinking" and rest:
+            card.thinking_capped = True
+            card.thinking = raw[: len(raw) - len(rest)]
         card.params[key] = shown
         frames: list[Frame] = []
-        if rest:
+        if rest and key == "content":
             frames.extend(self._maybe_trunc_footer(card, rest))
         card.streamed_keys.add(key)
         frames.append(

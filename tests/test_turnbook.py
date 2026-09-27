@@ -103,6 +103,25 @@ def test_mismatched_turn_is_ignored():
     book.open_turn(turn_id="t", session_id="s", now=0.0)
     assert book.push_content("other", "nope", segment_finalize=False, now=1.0) == []
 
+def test_thinking_overflow_no_footer_webhook_content_does():
+    book = _book()
+    book.bind_route(session_id="s", session_key="sk", chat_id="c", chat_type="dm")
+    book.open_turn(turn_id="t", session_id="s", now=0.0)
+    thinking_frames = book.push_thinking("t", "t" * 5000, now=0.1)
+    card = book.get("t")
+    assert not any(f.kind == "webhook" for f in thinking_frames)
+    assert "回答过长已截断" not in card.params["footer"]
+    assert card.params["thinking"].endswith("…")
+    assert len(card.params["thinking"].encode("utf-8")) <= 1024
+    capped = card.params["thinking"]
+    book.push_thinking("t", "more", now=0.2)
+    assert book.get("t").params["thinking"] == capped
+    content_frames = book.push_content("t", "c" * 5000, segment_finalize=False, now=0.3)
+    assert any(f.kind == "webhook" for f in content_frames)
+    assert "回答过长已截断" in book.get("t").params["footer"]
+    webhook = next(f for f in content_frames if f.kind == "webhook")
+    assert webhook.content
+
 def test_double_finish_is_noop():
     book = _book()
     book.bind_route(session_id="s", session_key="sk", chat_id="c", chat_type="dm")
