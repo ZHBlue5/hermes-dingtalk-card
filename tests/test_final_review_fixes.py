@@ -16,6 +16,78 @@ from hermes_plugins.dingtalk_streaming_card.textutil import tool_line
 from hermes_plugins.dingtalk_streaming_card.turnbook import Frame, TurnBook
 
 
+def test_coalesce_lock_held_for_mutations_not_for_send():
+    """push/flush 必须在 _coalesce_lock 内；publisher.send 不得持锁（无 sleep）。"""
+    book = TurnBook(group_thinking=True)
+    flags = {"push_unlocked": False, "flush_unlocked": False, "send_locked": False}
+    sent: list[Frame] = []
+
+    class Api:
+        async def stream(self, frame):
+            pass
+
+        async def update_params(self, frame):
+            pass
+
+        async def webhook(self, frame):
+            pass
+
+    class FakePub:
+        async def send(self, api, frames):
+            if bridge._coalesce_lock.locked():
+                flags["send_locked"] = True
+            sent.extend(frames)
+
+    class Loop:
+        def __init__(self):
+            self._cb = None
+
+        def call_soon_threadsafe(self, fn, *args):
+            fn(*args)
+
+        def call_later(self, delay, fn, *args):
+            self._cb = (fn, args)
+            return None
+
+    loop = Loop()
+    bridge = HookBridge(book, loop=loop, publisher=FakePub(), api=Api())
+    coalescer = Coalescer(0.4)
+    real_push = coalescer.push
+    real_flush = coalescer.flush
+
+    def guarded_push(frame, now):
+        if not bridge._coalesce_lock.locked():
+            flags["push_unlocked"] = True
+        return real_push(frame, now)
+
+    def guarded_flush(now, *, force=False):
+        if not bridge._coalesce_lock.locked():
+            flags["flush_unlocked"] = True
+        return real_flush(now, force=force)
+
+    coalescer.push = guarded_push  # type: ignore[method-assign]
+    coalescer.flush = guarded_flush  # type: ignore[method-assign]
+    bridge.coalescer = coalescer
+
+    bridge._emit(
+        [Frame("c", "t", "o", "stream", key="content", content="hi")], 0.0
+    )
+    assert loop._cb is not None
+    key = next(iter(coalescer._pending))
+    fr, _ = coalescer._pending[key]
+    coalescer._pending[key] = (fr, time.time() - 1.0)
+
+    async def _drive():
+        fn, args = loop._cb
+        fn(*args)
+
+    asyncio.run(_drive())
+    assert not flags["push_unlocked"]
+    assert not flags["flush_unlocked"]
+    assert not flags["send_locked"]
+    assert any(f.content == "hi" for f in sent)
+
+
 def test_flush_emits_due_frames_via_publisher():
     """非 immediate 帧 push 后应 schedule flush，到期后发给 publisher。"""
     book = TurnBook(group_thinking=True)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
@@ -41,6 +42,8 @@ class HookBridge:
         # session_key → (chat_id, chat_type)；宿主进线时尚无 session_id
         self._pending_chats: dict[str, tuple[str, str]] = {}
         self._flush_scheduled = False
+        # hook 线程 push 与 gateway loop flush 不得交错改 coalescer
+        self._coalesce_lock = threading.Lock()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop | None, api: Any = None) -> None:
         """绑定网关事件循环与 CardApi 实现。"""
@@ -107,39 +110,50 @@ class HookBridge:
     def _emit(self, frames: list[Frame], now: float) -> None:
         if not frames:
             return
-        ready: list[Frame] = []
-        for frame in frames:
-            ready.extend(self.coalescer.push(frame, now))
+        # 锁内：push / 拷贝待发帧 / 读 has_pending；锁外：publisher / 网络
+        with self._coalesce_lock:
+            ready: list[Frame] = []
+            for frame in frames:
+                ready.extend(self.coalescer.push(frame, now))
+            ready_out = list(ready)
+            need_flush = self.coalescer.has_pending
         if self.loop is None or self.api is None:
             return
-        if ready:
+        if ready_out:
             try:
                 asyncio.run_coroutine_threadsafe(
-                    self.publisher.send(self.api, ready), self.loop
+                    self.publisher.send(self.api, ready_out), self.loop
                 )
             except Exception:
                 logger.exception("failed to schedule card publisher")
-        if self.coalescer.has_pending:
+        if need_flush:
             self._schedule_flush()
 
     def _schedule_flush(self) -> None:
         """在 coalescer.interval 后刷出到期帧（纯文本轮不必等到 finish）。"""
-        if self.loop is None or self.api is None or self._flush_scheduled:
+        if self.loop is None or self.api is None:
             return
-        self._flush_scheduled = True
-        interval = self.coalescer.interval
+        with self._coalesce_lock:
+            if self._flush_scheduled:
+                return
+            self._flush_scheduled = True
+            interval = self.coalescer.interval
 
         def _run() -> None:
-            self._flush_scheduled = False
             if self.api is None:
+                with self._coalesce_lock:
+                    self._flush_scheduled = False
                 return
-            due = self.coalescer.flush(time.time(), force=False)
-            if due:
+            with self._coalesce_lock:
+                self._flush_scheduled = False
+                due_out = list(self.coalescer.flush(time.time(), force=False))
+                need_flush = self.coalescer.has_pending
+            if due_out:
                 try:
-                    asyncio.create_task(self.publisher.send(self.api, due))
+                    asyncio.create_task(self.publisher.send(self.api, due_out))
                 except Exception:
                     logger.exception("failed to publish flushed card frames")
-            if self.coalescer.has_pending:
+            if need_flush:
                 self._schedule_flush()
 
         def _arm() -> None:
@@ -148,7 +162,8 @@ class HookBridge:
         try:
             self.loop.call_soon_threadsafe(_arm)
         except Exception:
-            self._flush_scheduled = False
+            with self._coalesce_lock:
+                self._flush_scheduled = False
             logger.exception("failed to schedule coalescer flush")
 
     def _guard(self, name: str, fn: Any, **kwargs: Any) -> None:
