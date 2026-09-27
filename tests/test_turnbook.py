@@ -53,6 +53,22 @@ def test_tool_window_keeps_five_newest_first():
     assert "cmd=0" not in text
     assert text.index("cmd=5") < text.index("cmd=1")
 
+def test_tool_started_and_finished_emit_immediate_params():
+    book = _book()
+    book.bind_route(session_id="s", session_key="sk", chat_id="c", chat_type="dm")
+    book.open_turn(turn_id="t", session_id="s", now=0.0)
+    started = book.tool_started("t", "1", "terminal", {"cmd": "ls"}, now=1.0)
+    assert len(started) == 1
+    assert started[0].kind == "params"
+    assert started[0].immediate is True
+    assert "进行中" in started[0].params["tool"]
+    assert started[0].params["toolCount"] == "1"
+    finished = book.tool_finished("t", "1", now=2.0)
+    assert len(finished) == 1
+    assert finished[0].kind == "params"
+    assert finished[0].immediate is True
+    assert "进行中" not in finished[0].params["tool"]
+
 def test_other_session_same_chat_untouched():
     book = _book()
     book.bind_route(session_id="s1", session_key="sk1", chat_id="group", chat_type="group")

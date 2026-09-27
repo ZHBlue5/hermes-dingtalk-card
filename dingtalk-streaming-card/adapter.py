@@ -10,7 +10,7 @@ import logging
 import time
 import traceback
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from gateway.platforms.base import SendResult
 from plugins.platforms.dingtalk.adapter import DingTalkAdapter
@@ -113,9 +113,63 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
         )
 
     async def webhook(self, frame: Frame) -> None:
-        """CardApi：超长正文 webhook 补发。"""
-        metadata = {"session_webhook": (self._get_valid_webhook(frame.chat_id) or ("",))[0]}
-        await DingTalkAdapter.send(self, frame.chat_id, frame.content, metadata=metadata)
+        """CardApi：超长正文 webhook 补发（不走官方 send，避免再建官方卡）。"""
+        result = await self._send_markdown_webhook(frame.chat_id, frame.content)
+        if not result.success:
+            raise RuntimeError(result.error or "webhook markdown failed")
+
+    async def _send_markdown_webhook(
+        self,
+        chat_id: str,
+        content: str,
+        *,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """直接 POST session webhook markdown，不调用 DingTalkAdapter.send。"""
+        metadata = metadata or {}
+        session_webhook = metadata.get("session_webhook") or (
+            self._get_valid_webhook(chat_id) or ("",)
+        )[0]
+        if not session_webhook:
+            return SendResult(
+                success=False,
+                error="No valid session_webhook available. Reply must follow an incoming message.",
+            )
+        if not self._http_client:
+            return SendResult(success=False, error="HTTP client not initialized")
+        is_final_reply = reply_to is not None
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": "Hermes",
+                "text": self._normalize_markdown(content[: self.MAX_MESSAGE_LENGTH]),
+            },
+        }
+        try:
+            import httpx
+        except ImportError:
+            httpx = None  # type: ignore[assignment]
+        try:
+            resp = await self._http_client.post(session_webhook, json=payload, timeout=15.0)
+            if resp.status_code < 300:
+                if is_final_reply:
+                    self._fire_done_reaction(chat_id)
+                return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+            logger.warning(
+                "[%s] Webhook send failed HTTP %d: %s",
+                self.name,
+                resp.status_code,
+                resp.text[:200],
+            )
+            return SendResult(
+                success=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        except Exception as e:
+            if httpx is not None and isinstance(e, httpx.TimeoutException):
+                return SendResult(success=False, error="Timeout sending message to DingTalk")
+            logger.error("[%s] Webhook send error: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
 
     async def _stream_card_key(
         self,
@@ -167,7 +221,9 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
         metadata = metadata or {}
 
         if action == "webhook":
-            return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+            return await self._send_markdown_webhook(
+                chat_id, content, reply_to=reply_to, metadata=metadata
+            )
 
         if action == "reuse":
             frames = bridge.book.push_content(
@@ -181,16 +237,20 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
         frames = bridge.book.push_content(turn_id, content, segment_finalize=False, now=now)
         card = bridge.book.get(turn_id)
         current_message = self._message_contexts.get(chat_id)
-        session_webhook = metadata.get("session_webhook") or (self._get_valid_webhook(chat_id) or ("",))[0]
+        session_webhook = metadata.get("session_webhook") or (
+            self._get_valid_webhook(chat_id) or ("",)
+        )[0]
         if not session_webhook:
             return SendResult(
                 success=False,
                 error="No valid session_webhook available. Reply must follow an incoming message.",
             )
         if not self._http_client or not current_message:
-            return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+            return await self._send_markdown_webhook(
+                chat_id, content, reply_to=reply_to, metadata=metadata
+            )
 
-        result = await self._create_enhanced_card(
+        result, orphaned = await self._create_enhanced_card(
             chat_id, current_message, card, content, finalize=reply_to is not None
         )
         if result and result.success:
@@ -201,8 +261,12 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
             else:
                 self._streaming_cards.setdefault(chat_id, {})[result.message_id] = content
             return result
+        if orphaned:
+            bridge.book.abandon_undelivered(turn_id)
         logger.warning("[%s] Enhanced AI Card send failed, falling back to webhook", self.name)
-        return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+        return await self._send_markdown_webhook(
+            chat_id, content, reply_to=reply_to, metadata=metadata
+        )
 
     async def _create_enhanced_card(
         self,
@@ -212,16 +276,17 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
         content: str,
         *,
         finalize: bool,
-    ) -> Optional[SendResult]:
-        """建卡时写入 TurnBook 全量 params；流式 key 先写 content。"""
+    ) -> Tuple[Optional[SendResult], bool]:
+        """建卡；若 create 成功但 deliver/首帧失败，返回 orphaned=True。"""
+        created = False
+        out_track_id = card.out_track_id
         try:
             from plugins.platforms.dingtalk import adapter as official
 
             token = await self._get_access_token()
             if not token or not official.CARD_SDK_AVAILABLE:
-                return None
+                return None, False
             models = official.dingtalk_card_models
-            out_track_id = card.out_track_id
             is_group = str(getattr(message, "conversation_type", "1")) == "2"
             sender_staff_id = getattr(message, "sender_staff_id", "") or ""
             param_map = dict(card.params)
@@ -243,6 +308,7 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
                 models.CreateCardHeaders,
                 token,
             )
+            created = True
             if is_group:
                 open_space_id = (
                     f"dtv1.card//IM_GROUP.{getattr(message, 'conversation_id', '') or ''}"
@@ -260,9 +326,13 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
                     )
                 }
             else:
-                return logger.warning(
-                    "[%s] AI Card skipped: missing sender_staff_id for DM", self.name
+                logger.error(
+                    "[%s] AI Card deliver skipped after create (missing sender_staff_id); "
+                    "outTrackId=%s",
+                    self.name,
+                    out_track_id,
                 )
+                return None, True
             deliver_request = models.DeliverCardRequest(
                 out_track_id=out_track_id,
                 user_id_type=1,
@@ -285,15 +355,24 @@ class EnhancedDingTalkAdapter(DingTalkAdapter):
                 "created+finalized" if finalize else "created (streaming)",
                 out_track_id,
             )
-            return SendResult(success=True, message_id=out_track_id)
+            return SendResult(success=True, message_id=out_track_id), False
         except Exception as e:
+            if created:
+                logger.error(
+                    "[%s] AI Card deliver/stream failed after create; outTrackId=%s: %s\n%s",
+                    self.name,
+                    out_track_id,
+                    e,
+                    traceback.format_exc(),
+                )
+                return None, True
             logger.warning(
                 "[%s] Enhanced AI Card create failed: %s\n%s",
                 self.name,
                 e,
                 traceback.format_exc(),
             )
-            return None
+            return None, False
 
     async def edit_message(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False

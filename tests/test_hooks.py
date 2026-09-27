@@ -46,3 +46,36 @@ def test_api_request_error_closes_without_session_end():
     bridge.api_request_error(turn_id="t", error_message="timeout")
     assert bridge.book.get("t").status == "error"
     assert bridge.book.get("t").params["footer"] == "timeout"
+
+def test_host_pre_gateway_binds_via_session_store():
+    bridge = HookBridge(TurnBook(group_thinking=True), loop=None)
+
+    class Source:
+        chat_id = "c"
+        chat_type = "dm"
+
+    class Event:
+        source = Source()
+        text = "hi"
+
+    class Gateway:
+        def _session_key_for_source(self, source):
+            return "sk"
+
+    class Entry:
+        session_key = "sk"
+        session_id = "sid"
+
+    class Store:
+        def lookup_by_session_id(self, session_id):
+            assert session_id == "sid"
+            return Entry()
+
+    bridge.pre_gateway_dispatch(
+        event=Event(), gateway=Gateway(), session_store=Store()
+    )
+    assert bridge.book.turns == {}
+    assert bridge.book.routes == {}
+    bridge.on_stream_delta(turn_id="t", session_id="sid", kind="text", delta="x")
+    assert "t" in bridge.book.turns
+    assert bridge.book.routes["sid"] == ("sk", "c", "dm")

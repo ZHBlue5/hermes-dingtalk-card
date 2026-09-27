@@ -216,7 +216,7 @@ class TurnBook:
         if len(card.tools) > _MAX_TOOLS:
             card.tools = card.tools[:_MAX_TOOLS]
         self._sync_tools(card)
-        return []
+        return [self._params_frame(card, immediate=True)]
 
     def tool_finished(self, turn_id: str, tool_id: str, *, now: float) -> list[Frame]:
         card = self.turns.get(turn_id)
@@ -227,7 +227,17 @@ class TurnBook:
                 row.running = False
                 break
         self._sync_tools(card)
-        return []
+        return [self._params_frame(card, immediate=True)]
+
+    def abandon_undelivered(self, turn_id: str) -> None:
+        """Create 已成功但投放/首帧失败：停 running，不 mark_delivered，避免同 outTrackId 再建。"""
+        card = self.turns.get(turn_id)
+        if card is None or card.delivered or card.status != "running":
+            return
+        card.status = "error"
+        card.params["status"] = "error"
+        card.params["headerColor"] = "danger"
+        self._session_running.pop(card.session_key, None)
 
     def add_usage(
         self,
@@ -282,6 +292,16 @@ class TurnBook:
         ]
         card.params["tool"] = fit_param("\n".join(lines))
         card.params["toolCount"] = str(card.tool_total)
+
+    def _params_frame(self, card: Card, *, immediate: bool = False) -> Frame:
+        return Frame(
+            card.chat_id,
+            card.turn_id,
+            card.out_track_id,
+            "params",
+            params=dict(card.params),
+            immediate=immediate,
+        )
 
     def _push_body(
         self,

@@ -37,6 +37,9 @@ class HookBridge:
         self.coalescer = coalescer or Coalescer(_INTERVAL)
         self.publisher = publisher or Publisher()
         self.api = api
+        self._session_store: Any = None
+        # session_key → (chat_id, chat_type)；宿主进线时尚无 session_id
+        self._pending_chats: dict[str, tuple[str, str]] = {}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop | None, api: Any = None) -> None:
         """绑定网关事件循环与 CardApi 实现。"""
@@ -63,10 +66,39 @@ class HookBridge:
         line = str(text).split("\n", 1)[0].strip()
         return line or default
 
+    def _bind_session_id(self, session_id: str) -> bool:
+        """有 session_id 但尚无 route 时，用 pending chat + session_store 补 bind。"""
+        if not session_id or session_id in self.book.routes:
+            return session_id in self.book.routes
+        store = self._session_store
+        if store is None:
+            return False
+        try:
+            entry = store.lookup_by_session_id(session_id)
+        except Exception:
+            logger.exception("lookup_by_session_id failed")
+            return False
+        if entry is None:
+            return False
+        session_key = getattr(entry, "session_key", None) or ""
+        pending = self._pending_chats.get(str(session_key))
+        if not pending:
+            return False
+        chat_id, chat_type = pending
+        self.book.bind_route(
+            session_id=str(session_id),
+            session_key=str(session_key),
+            chat_id=chat_id,
+            chat_type=chat_type,
+        )
+        return True
+
     def _ensure_open(self, turn_id: str, session_id: str, now: float) -> list[Frame]:
         if not turn_id or turn_id in self.book.turns:
             return []
-        if not session_id or session_id not in self.book.routes:
+        if not session_id:
+            return []
+        if session_id not in self.book.routes and not self._bind_session_id(session_id):
             return []
         return self.book.open_turn(turn_id=turn_id, session_id=session_id, now=now)
 
@@ -95,19 +127,35 @@ class HookBridge:
 
     def _pre_gateway_dispatch(self, **kwargs: Any) -> None:
         event = kwargs.get("event")
+        gateway = kwargs.get("gateway")
+        session_store = kwargs.get("session_store")
+        if session_store is not None:
+            self._session_store = session_store
         source = getattr(event, "source", None) if event is not None else None
         session_id = kwargs.get("session_id") or ""
         session_key = kwargs.get("session_key") or ""
         chat_id = getattr(source, "chat_id", None) or kwargs.get("chat_id") or ""
         chat_type = getattr(source, "chat_type", None) or kwargs.get("chat_type") or "dm"
-        if not session_id or not chat_id:
+        if not chat_id:
             return
-        self.book.bind_route(
-            session_id=str(session_id),
-            session_key=str(session_key),
-            chat_id=str(chat_id),
-            chat_type=str(chat_type),
-        )
+        # 测试/旧路径：kwargs 自带 session_id 时直接 bind
+        if session_id:
+            self.book.bind_route(
+                session_id=str(session_id),
+                session_key=str(session_key),
+                chat_id=str(chat_id),
+                chat_type=str(chat_type),
+            )
+            return
+        # 宿主路径：只有 event/gateway/session_store，先按 session_key 记 chat
+        if gateway is not None and source is not None:
+            try:
+                session_key = gateway._session_key_for_source(source) or ""
+            except Exception:
+                logger.exception("gateway._session_key_for_source failed")
+                session_key = ""
+        if session_key:
+            self._pending_chats[str(session_key)] = (str(chat_id), str(chat_type))
 
     def on_stream_delta(self, **kwargs: Any) -> None:
         """任意 kind 首帧建卡；reasoning 写 thinking；text 不写 content。"""
